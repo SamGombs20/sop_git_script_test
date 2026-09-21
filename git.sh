@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# gsync.sh — add, commit, pull (merge), reconcile Alembic migrations, push.
+# git.sh — add, commit, pull (merge), reconcile Alembic migrations, push.
 #
-# Usage:  ./gsync.sh "commit message"
+# Usage:  ./git.sh "commit message"
 #
 # Env overrides:
 #   ALEMBIC_DIR       directory containing alembic.ini   (default: repo root)
@@ -36,7 +36,7 @@ info() { echo "➜ $*"; }
 warn() { echo "⚠️  $*"; }
 
 # --- 0. Sanity checks -------------------------------------------------------
-[ -z "${1:-}" ] && die "Please provide a commit message: ./gsync.sh \"message\""
+[ -z "${1:-}" ] && die "Please provide a commit message: ./git.sh \"message\""
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Not inside a git repository"
 
 # symbolic-ref (unlike rev-parse) also works in a repo with no commits yet
