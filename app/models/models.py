@@ -151,3 +151,9 @@ class ProjectPartner(Base):
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), primary_key=True)
     partner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("partners.id"), primary_key=True)
+
+class Crm(Base):
+    __tablename__ = "crms"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
