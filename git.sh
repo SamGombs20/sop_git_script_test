@@ -10,6 +10,8 @@
 #   AUTO_UPGRADE=1    upgrade the database without asking
 #   SKIP_DB=1         only merge heads; don't touch the database
 #   PR_BASE           base branch for the PR   (default: main for hotfix/*, else dev)
+#                     — also the branch offered for syncing into yours before the PR
+#   SYNC_BASE         1 = always merge the base branch in, 0 = never, unset = ask when it has new commits
 #   BRANCH_PREFIXES   allowed branch prefixes  (default: feature|bugfix|hotfix)
 #   COMMIT_TYPES      allowed commit types     (default: feat|fix|refactor|docs|test|chore)
 #   ALLOW_PROTECTED=1 allow running on main/dev (SOP says don't)
@@ -129,6 +131,20 @@ case "$BRANCH" in
   main|master|dev|develop)
     if [ "${ALLOW_PROTECTED:-0}" != "1" ]; then
       warn "You're on '$BRANCH'. Per the SOP, don't work directly on main or dev."
+      # In a repo with no commits, '$BRANCH' isn't a real branch yet: branching off now
+      # would make it vanish and your first commit would land on the new branch.
+      if ! git rev-parse --verify -q HEAD >/dev/null; then
+        echo "   This repo has no commits yet, so '$BRANCH' doesn't really exist until it has one."
+        if confirm "Create an empty initial commit on '$BRANCH' first (so it exists)?"; then
+          # plumbing, so anything you've already staged stays out of this commit
+          init_sha=$(git commit-tree "$(git mktree </dev/null)" -m "chore: initial commit") \
+            && git update-ref "refs/heads/$BRANCH" "$init_sha" \
+            || die "Couldn't create the initial commit (are git user.name / user.email set?)"
+          info "Created '$BRANCH' with an empty initial commit. Publish it later: git push -u origin $BRANCH"
+        else
+          warn "Continuing without it — '$BRANCH' won't exist afterwards."
+        fi
+      fi
       if git rev-parse --verify -q "origin/$BRANCH" >/dev/null; then
         ahead=$(git rev-list --count "origin/$BRANCH..$BRANCH")
         if [ "$ahead" -gt 0 ]; then
@@ -159,7 +175,8 @@ fi
 alembic_run() { (cd "$ALEMBIC_DIR" && $ALEMBIC_CMD "$@"); }
 
 # Revision ids only, sorted, one per line
-rev_ids() { grep -oE '^[0-9a-zA-Z_]+' | sort; }
+# Only real revision lines, e.g. "e0988833ea88 (head)" — not alembic's "INFO  [alembic..." log lines
+rev_ids() { grep -E '^[0-9a-zA-Z_]+( \([^)]*\))*$' | awk '{print $1}' | sort; }
 
 has_alembic() {
   [ -f "$ALEMBIC_DIR/alembic.ini" ] && command -v "${ALEMBIC_CMD%% *}" >/dev/null 2>&1
@@ -198,6 +215,21 @@ reconcile_database() {
       warn "Your database is at a revision that isn't in your migration files."
       echo "   Usually it was migrated from another branch, or a teammate's migration"
       echo "   hasn't been pulled. Skipping — no automatic fix ('stamp' can hide real drift)."
+    elif echo "$out" | grep -q "sqlalchemy.dialects:driver"; then
+      warn "alembic.ini still has the placeholder database URL (driver://user:pass@localhost/dbname)."
+      echo "   Set sqlalchemy.url in alembic.ini, or read your real URL in alembic/env.py, e.g.:"
+      echo "     config.set_main_option(\"sqlalchemy.url\", os.environ[\"DATABASE_URL\"])"
+      echo "   For a quick local test: sqlalchemy.url = sqlite:///test.db"
+    elif echo "$out" | grep -q "NoSuchModuleError"; then
+      warn "SQLAlchemy can't load the database driver named in your URL."
+      echo "   Check the URL's dialect (e.g. postgresql+psycopg2://...) and that the driver is"
+      echo "   installed in the active virtualenv (e.g. pip install psycopg2-binary)."
+    elif echo "$out" | grep -qE "OperationalError|Connection refused|could not connect|password authentication"; then
+      warn "Couldn't connect to the database. Is it running, and are the URL/credentials right?"
+      echo "$out" | tail -3 | sed 's/^/     /'
+    elif echo "$out" | grep -q "ModuleNotFoundError"; then
+      warn "A Python module is missing — is your virtualenv activated?"
+      echo "$out" | tail -2 | sed 's/^/     /'
     else
       warn "Could not read the database's current revision:"
       echo "$out" | tail -5 | sed 's/^/     /'
@@ -245,6 +277,67 @@ reconcile_alembic() {
   fi
 }
 
+# Base branch for this branch's PR: hotfix/* goes to main, everything else to dev
+pr_base() {
+  if [ -n "$PR_BASE" ]; then echo "$PR_BASE"; return; fi
+  case "$BRANCH" in hotfix/*) echo "main" ;; *) echo "dev" ;; esac
+}
+
+report_conflicts() {
+  echo
+  warn "Merge conflicts in:"
+  git diff --name-only --diff-filter=U | sed 's/^/     /'
+
+  if git diff --name-only --diff-filter=U | grep -q 'alembic/versions/'; then
+    echo
+    echo "   Conflicts inside alembic/versions/ usually mean two people edited the"
+    echo "   same migration file. Resolve by hand — don't tweak down_revision to"
+    echo "   'make it fit'; use 'alembic merge' after resolving instead."
+  fi
+
+  echo
+  echo "Resolve, then:  git add <files> && git commit"
+  echo "Re-run this script afterwards (it goes straight to reconcile + push)."
+}
+
+# If the PR's base branch (dev, or main for hotfixes) has moved on since you
+# branched, offer to merge it into your branch — so conflicts and new Alembic
+# migrations show up now, not at PR time. Merge only: no rebase, no force-push.
+sync_from_base() {
+  local base behind
+  base=$(pr_base)
+  [ "$BRANCH" = "$base" ] && return 0
+  [ "${SYNC_BASE:-ask}" = "0" ] && return 0
+
+  if ! git fetch -q origin "$base" 2>/dev/null; then
+    info "Couldn't fetch origin/$base — skipping the sync check"
+    return 0
+  fi
+  git rev-parse --verify -q "origin/$base" >/dev/null || return 0
+
+  behind=$(git rev-list --count "HEAD..origin/$base")
+  if [ "$behind" -eq 0 ]; then
+    info "Up to date with origin/$base ✔"
+    return 0
+  fi
+
+  echo
+  info "origin/$base has $behind commit(s) that '$BRANCH' doesn't have yet:"
+  git log --oneline --no-decorate -5 "HEAD..origin/$base" | sed 's/^/     /'
+  [ "$behind" -gt 5 ] && echo "     ... and $((behind - 5)) more"
+
+  if [ "${SYNC_BASE:-ask}" != "1" ] && ! confirm "Merge origin/$base into '$BRANCH' now?"; then
+    warn "Skipped — expect to resolve any differences at PR time."
+    return 0
+  fi
+
+  if ! git merge --no-edit "origin/$base"; then
+    report_conflicts
+    exit 1
+  fi
+  info "Merged origin/$base ✔"
+}
+
 # --- 1. Commit local work ---------------------------------------------------
 info "Staging and committing on '$BRANCH'"
 git add -A
@@ -258,25 +351,15 @@ fi
 if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
   info "Pulling origin/$BRANCH"
   if ! git pull --no-rebase --no-edit origin "$BRANCH"; then
-    echo
-    warn "Merge conflicts in:"
-    git diff --name-only --diff-filter=U | sed 's/^/     /'
-
-    if git diff --name-only --diff-filter=U | grep -q 'alembic/versions/'; then
-      echo
-      echo "   Conflicts inside alembic/versions/ usually mean two people edited the"
-      echo "   same migration file. Resolve by hand — don't tweak down_revision to"
-      echo "   'make it fit'; use 'alembic merge' after resolving instead."
-    fi
-
-    echo
-    echo "Resolve, then:  git add <files> && git commit"
-    echo "Re-run this script afterwards (it goes straight to reconcile + push)."
+    report_conflicts
     exit 1
   fi
 else
   info "Remote branch doesn't exist yet — skipping pull"
 fi
+
+# --- 2b. Bring in the base branch (dev / main) if it has moved on ----------
+sync_from_base
 
 # --- 3. Reconcile migrations ------------------------------------------------
 reconcile_alembic
@@ -288,10 +371,7 @@ if git push -u origin "$BRANCH"; then
   echo "✅ Pushed."
 
   # --- 5. Open a Pull Request (SOP step 5) ----------------------------------
-  base="$PR_BASE"
-  if [ -z "$base" ]; then
-    case "$BRANCH" in hotfix/*) base="main" ;; *) base="dev" ;; esac
-  fi
+  base=$(pr_base)
   remote_url=$(git remote get-url origin 2>/dev/null || true)
   web_url=$(echo "$remote_url" \
     | sed -E 's#^git@([^:]+):#https://\1/#; s#^ssh://git@([^/]+)/#https://\1/#; s#\.git$##')
