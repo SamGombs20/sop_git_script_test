@@ -9,3 +9,8 @@ def root():
 @app.get("/greetings")
 def greetings():
     return {"greeting":"Hello there"}
+
+app = FastAPI()
+@app.get("/crms")
+async def crms():
+    return {"name": ""}
