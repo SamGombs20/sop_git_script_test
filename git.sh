@@ -15,6 +15,8 @@
 #   BRANCH_PREFIXES   allowed branch prefixes  (default: feature|bugfix|hotfix)
 #   COMMIT_TYPES      allowed commit types     (default: feat|fix|refactor|docs|test|chore)
 #   ALLOW_PROTECTED=1 allow running on main/dev (SOP says don't)
+#   PERSONAL=1        solo-project mode: skip SOP checks below, work straight on
+#                     whatever branch you're on (main included), no PR prompt
 
 set -uo pipefail
 
@@ -129,7 +131,9 @@ choose_branch_action() {
 
 case "$BRANCH" in
   main|master|dev|develop)
-    if [ "${ALLOW_PROTECTED:-0}" != "1" ]; then
+    if [ "${PERSONAL:-0}" = "1" ]; then
+      : # solo project — main/dev is fine, no branch dance
+    elif [ "${ALLOW_PROTECTED:-0}" != "1" ]; then
       warn "You're on '$BRANCH'. Per the SOP, don't work directly on main or dev."
       # In a repo with no commits, '$BRANCH' isn't a real branch yet: branching off now
       # would make it vanish and your first commit would land on the new branch.
@@ -157,7 +161,7 @@ case "$BRANCH" in
     fi ;;
 esac
 
-if ! valid_branch "$BRANCH"; then
+if [ "${PERSONAL:-0}" != "1" ] && ! valid_branch "$BRANCH"; then
   warn "Branch '$BRANCH' doesn't follow the naming convention ($BRANCH_PREFIXES)/<description>"
   if ! choose_branch_action; then
     confirm "Continue on '$BRANCH' anyway?" || die "Stopped."
@@ -165,7 +169,7 @@ if ! valid_branch "$BRANCH"; then
 fi
 
 # SOP: commit messages like "fix: correct table sorting logic"
-if ! echo "$1" | grep -qE "^($COMMIT_TYPES)(\([^)]+\))?!?: .+"; then
+if [ "${PERSONAL:-0}" != "1" ] && ! echo "$1" | grep -qE "^($COMMIT_TYPES)(\([^)]+\))?!?: .+"; then
   warn "Commit message should be 'type: short summary' with type one of: ${COMMIT_TYPES//|/, }"
   echo "   e.g. \"fix: correct table sorting logic\""
   confirm "Commit with it anyway?" || die "Re-run with a conventional message."
@@ -370,7 +374,10 @@ info "Pushing to origin/$BRANCH"
 if git push -u origin "$BRANCH"; then
   echo "✅ Pushed."
 
-  # --- 5. Open a Pull Request (SOP step 5) ----------------------------------
+  # --- 5. Open a Pull Request (SOP step 5) — skipped in solo mode ------------
+  if [ "${PERSONAL:-0}" = "1" ]; then
+    exit 0
+  fi
   base=$(pr_base)
   remote_url=$(git remote get-url origin 2>/dev/null || true)
   web_url=$(echo "$remote_url" \
