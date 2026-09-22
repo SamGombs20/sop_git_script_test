@@ -17,3 +17,7 @@ async def crms():
 @app.get("/hello")
 async def hello():
     return {"hello": "world"}
+
+@app.get("/test")
+async def test():
+    return {"test": "test"}
