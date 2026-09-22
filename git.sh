@@ -16,7 +16,9 @@
 #   COMMIT_TYPES      allowed commit types     (default: feat|fix|refactor|docs|test|chore)
 #   ALLOW_PROTECTED=1 allow running on main/dev (SOP says don't)
 #   PERSONAL=1        solo-project mode: skip SOP checks below, work straight on
-#                     whatever branch you're on (main included), no PR prompt
+#                     whatever branch you're on (main included), no PR prompt.
+#                     If unset, the script asks once per repo (personal or team)
+#                     and remembers the answer in that repo's local git config.
 
 set -uo pipefail
 
@@ -40,6 +42,27 @@ warn() { echo "⚠️  $*"; }
 # --- 0. Sanity checks -------------------------------------------------------
 [ -z "${1:-}" ] && die "Please provide a commit message: ./git.sh \"message\""
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Not inside a git repository"
+
+# --- Solo vs. team mode ------------------------------------------------------
+# PERSONAL, if set in the environment, always wins and nothing is asked or stored.
+# Otherwise: check this repo's local git config; ask once if it isn't set yet,
+# and remember the answer there so future runs in this repo don't ask again.
+if [ -z "${PERSONAL:-}" ]; then
+  stored=$(git config --local --get gitsh.personal 2>/dev/null || true)
+  if [ -n "$stored" ]; then
+    PERSONAL="$stored"
+  else
+    echo "Is this a personal / solo project, or a team one with an SOP to follow?"
+    read -r -p "  [p]ersonal / [t]eam (default: team): " mode
+    case "$mode" in
+      [Pp]*) PERSONAL=1 ;;
+      *) PERSONAL=0 ;;
+    esac
+    git config --local gitsh.personal "$PERSONAL" 2>/dev/null || true
+    info "Remembered for this repo. To change it later: git config --local gitsh.personal <0|1>"
+  fi
+fi
+
 
 # symbolic-ref (unlike rev-parse) also works in a repo with no commits yet
 BRANCH=$(git symbolic-ref --short -q HEAD || true)
